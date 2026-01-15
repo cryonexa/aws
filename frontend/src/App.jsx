@@ -1,34 +1,68 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { io } from "socket.io-client";
-import axios from "axios";
-
-const API_URL = import.meta.env.VITE_API_URL || "http://localhost:3000";
+import { useCallback, useEffect, useState } from "react";
+import { fetchMessages, fetchUsers, login, signup } from "./api";
+import { socket } from "./socket";
+import Signup from "./screens/Signup";
+import Login from "./screens/Login";
+import Chat from "./screens/Chat";
+import Admin from "./screens/Admin";
 
 export default function App() {
+  const [view, setView] = useState("signup");
+  const [signupName, setSignupName] = useState("");
+  const [signupPassword, setSignupPassword] = useState("");
+  const [signupConfirm, setSignupConfirm] = useState("");
+  const [loginName, setLoginName] = useState("");
+  const [loginPassword, setLoginPassword] = useState("");
   const [username, setUsername] = useState("");
+  const [users, setUsers] = useState([]);
   const [activeUser, setActiveUser] = useState("");
-  const [onlineUsers, setOnlineUsers] = useState([]);
   const [messages, setMessages] = useState([]);
   const [messageBody, setMessageBody] = useState("");
   const [connected, setConnected] = useState(false);
-  const usernameRef = useRef("");
+  const [signupErrors, setSignupErrors] = useState({});
+  const [loginErrors, setLoginErrors] = useState({});
+  const [registerError, setRegisterError] = useState("");
 
-  const socket = useMemo(
-    () =>
-      io(API_URL, {
-        transports: ["websocket"],
-      }),
-    []
-  );
+  const loadUsers = useCallback(() => {
+    fetchUsers()
+      .then((res) => setUsers(res.data))
+      .catch(() => setUsers([]));
+  }, []);
 
   useEffect(() => {
-    socket.on("connect", () => setConnected(true));
+    const syncFromHash = () => {
+      const hash = window.location.hash.replace("#", "");
+      if (hash === "login" || hash === "signup" || hash === "chat" || hash === "admin") {
+        setView(hash);
+      }
+    };
+    syncFromHash();
+    window.addEventListener("hashchange", syncFromHash);
+    return () => window.removeEventListener("hashchange", syncFromHash);
+  }, []);
+
+  const setRoute = (next) => {
+    window.location.hash = next;
+    setView(next);
+  };
+
+  useEffect(() => {
+    socket.on("connect", () => {
+      setConnected(true);
+      if (view === "chat" && username) {
+        socket.emit("register", username);
+        loadUsers();
+      }
+    });
     socket.on("disconnect", () => setConnected(false));
-    socket.on("online_users", (users) => {
-      setOnlineUsers(users.filter((user) => user !== usernameRef.current));
+    socket.on("online_users", () => {
+      loadUsers();
     });
     socket.on("message", (msg) => {
       setMessages((prev) => [...prev, msg]);
+    });
+    socket.on("register_error", (error) => {
+      setRegisterError(error);
     });
 
     return () => {
@@ -36,31 +70,76 @@ export default function App() {
       socket.off("disconnect");
       socket.off("online_users");
       socket.off("message");
-      socket.disconnect();
+      socket.off("register_error");
     };
-  }, [socket]);
+  }, [loadUsers]);
 
   useEffect(() => {
-    usernameRef.current = username;
-  }, [username]);
+    if (view === "chat" && username) {
+      socket.emit("register", username);
+      loadUsers();
+    }
+    if (view !== "chat" && username) {
+      socket.emit("unregister", username);
+    }
+  }, [loadUsers, username, view]);
 
   useEffect(() => {
     if (!username || !activeUser) {
       setMessages([]);
       return;
     }
-    axios
-      .get(`${API_URL}/messages`, { params: { me: username, user: activeUser } })
+    fetchMessages(username, activeUser)
       .then((res) => setMessages(res.data))
       .catch(() => setMessages([]));
   }, [activeUser, username]);
 
-  const handleRegister = (event) => {
+  const handleSignup = (event) => {
     event.preventDefault();
-    if (!username.trim()) {
+    setSignupErrors({});
+    if (signupPassword !== signupConfirm) {
+      setSignupErrors({ confirm: "Passwords do not match." });
       return;
     }
-    socket.emit("register", username.trim());
+    signup(signupName.trim(), signupPassword)
+      .then(() => {
+        setSignupName("");
+        setSignupPassword("");
+        setSignupConfirm("");
+        setRoute("login");
+      })
+      .catch((err) => {
+        if (err.response?.status === 409) {
+          setSignupErrors({ username: "Username already exists." });
+        } else {
+          setSignupErrors({ form: "Signup failed. Try again." });
+        }
+      });
+  };
+
+  const handleLogin = (event) => {
+    event.preventDefault();
+    setLoginErrors({});
+    login(loginName.trim(), loginPassword)
+      .then(() => {
+        setUsername(loginName.trim());
+        setRoute("chat");
+        setRegisterError("");
+      })
+      .catch(() => {
+        setLoginErrors({
+          username: "Check your username.",
+          password: "Check your password.",
+        });
+      });
+  };
+
+  const handleLogout = () => {
+    socket.emit("unregister", username);
+    setUsername("");
+    setActiveUser("");
+    setMessages([]);
+    setRoute("login");
   };
 
   const handleSend = (event) => {
@@ -72,80 +151,58 @@ export default function App() {
     setMessageBody("");
   };
 
+  if (view === "signup") {
+    return (
+      <Signup
+        signupName={signupName}
+        signupPassword={signupPassword}
+        signupConfirm={signupConfirm}
+        signupErrors={signupErrors}
+        onChangeName={(event) => setSignupName(event.target.value)}
+        onChangePassword={(event) => setSignupPassword(event.target.value)}
+        onChangeConfirm={(event) => setSignupConfirm(event.target.value)}
+        onSubmit={handleSignup}
+        onSwitch={() => setRoute("login")}
+      />
+    );
+  }
+
+  if (view === "login") {
+    return (
+      <Login
+        loginName={loginName}
+        loginPassword={loginPassword}
+        loginErrors={loginErrors}
+        onChangeName={(event) => setLoginName(event.target.value)}
+        onChangePassword={(event) => setLoginPassword(event.target.value)}
+        onSubmit={handleLogin}
+        onSwitch={() => setRoute("signup")}
+      />
+  );
+}
+
+  if (view === "admin") {
+    return <Admin onBack={() => setRoute("chat")} />;
+  }
+
   return (
-    <div className="page">
-      <header className="header">
-        <div>
-          <h1>Simple Chat</h1>
-          <p>Online: {onlineUsers.length}</p>
-        </div>
-        <div className={`status ${connected ? "ok" : "bad"}`}>
-          {connected ? "Connected" : "Offline"}
-        </div>
-      </header>
-
-      <section className="main">
-        <aside className="panel">
-          <form className="form" onSubmit={handleRegister}>
-            <label>
-              Your name
-              <input
-                value={username}
-                onChange={(event) => setUsername(event.target.value)}
-                placeholder="e.g. alice"
-              />
-            </label>
-            <button type="submit">Go online</button>
-          </form>
-
-          <div className="list">
-            <h2>Online users</h2>
-            {onlineUsers.length === 0 && <p>No one online yet.</p>}
-            {onlineUsers.map((user) => (
-              <button
-                key={user}
-                type="button"
-                className={user === activeUser ? "active" : ""}
-                onClick={() => setActiveUser(user)}
-              >
-                {user}
-              </button>
-            ))}
-          </div>
-        </aside>
-
-        <section className="chat">
-          <div className="chat-header">
-            <h2>{activeUser ? `Chat with ${activeUser}` : "Pick a user"}</h2>
-          </div>
-          <div className="chat-body">
-            {activeUser ? (
-              messages.map((msg, idx) => (
-                <div
-                  key={`${msg.created_at}-${idx}`}
-                  className={`bubble ${msg.sender === username ? "me" : ""}`}
-                >
-                  <span className="meta">{msg.sender}</span>
-                  <p>{msg.body}</p>
-                </div>
-              ))
-            ) : (
-              <p className="empty">Select an online user to start chatting.</p>
-            )}
-          </div>
-          <form className="chat-form" onSubmit={handleSend}>
-            <input
-              value={messageBody}
-              onChange={(event) => setMessageBody(event.target.value)}
-              placeholder="Type a message..."
-              disabled={!activeUser}
-            />
-            <button type="submit" disabled={!activeUser}>
-              Send
-            </button>
-          </form>
-        </section>
-      </section>
-    </div>
+      <Chat
+        username={username}
+        connected={connected}
+        users={users}
+        activeUser={activeUser}
+      messages={messages}
+      messageBody={messageBody}
+      registerError={registerError}
+      onSelectUser={(user) => {
+        if (user.online) {
+          setActiveUser(user.username);
+        }
+      }}
+      onChangeMessage={(event) => setMessageBody(event.target.value)}
+      onSend={handleSend}
+      onShowAdmin={() => setRoute("admin")}
+      onLogout={handleLogout}
+    />
   );
 }
